@@ -5,6 +5,20 @@
 ! See frr_pe.conf.j2 for the network-statement-placement quirk this
 ! also follows (originate under ipv4 unicast, activate under
 ! labeled-unicast).
+!
+! CRITICAL: `next-hop-self all`, not plain `next-hop-self`. Standard
+! BGP RR behavior (documented identically across Cisco/Juniper/FRR)
+! never rewrites next-hop on a *reflected* route — only on routes this
+! router originates or learns via eBGP. With no IGP in this design,
+! that breaks any route crossing BOTH Route Reflectors (e.g. India's
+! route via Singapore, re-reflected by Dallas to Seattle): the
+! next-hop stays as India's own address on a link Dallas has zero
+! presence on, so Dallas can never resolve it and silently drops the
+! route instead of re-advertising it. `all` forces the RR to rewrite
+! next-hop to itself at every hop, exactly like a normal iBGP chain
+! without an IGP needs. Single-hop reflection (a direct client's own
+! address) happened to still resolve without this, which is why this
+! bug didn't show up until testing a route that crosses both RRs.
 frr version 9.0
 frr defaults traditional
 hostname {{ node.name }}
@@ -34,7 +48,7 @@ router bgp {{ node.bgp_as }}
  address-family ipv4 labeled-unicast
 {% for nb in node.underlay_neighbors %}
   neighbor {{ nb.peer_ip }} activate
-  neighbor {{ nb.peer_ip }} next-hop-self
+  neighbor {{ nb.peer_ip }} next-hop-self all
 {% if nb.is_client %}
   neighbor {{ nb.peer_ip }} route-reflector-client
 {% endif %}
