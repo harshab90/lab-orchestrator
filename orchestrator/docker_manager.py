@@ -1,12 +1,12 @@
 """
 Wraps the `docker` CLI (kept as subprocess calls, not the Python SDK,
 so this has zero extra dependencies beyond Docker itself being
-installed) to start/stop cEOS containers with the environment cEOS
-needs to boot into a working EOS CLI instead of a bare Linux shell.
+installed) to start/stop containers with the environment each
+platform needs to boot into a working CLI instead of a bare shell.
 
 Containers start with --network=none: no interfaces are attached at
 all until wiring.py adds them. This is deliberate — it means the only
-interfaces EOS ever sees are the ones you explicitly wired.
+interfaces the router OS ever sees are the ones you explicitly wired.
 """
 import os
 import subprocess
@@ -35,18 +35,42 @@ def _run(cmd: list[str], check=True):
     return subprocess.run(cmd, check=check, capture_output=True, text=True)
 
 
-def start_node(topo: Topology, node_name: str):
-    node = topo.nodes[node_name]
-    config_dir = os.path.abspath(os.path.join(GENERATED_DIR, node_name))
+def _start_ceos(topo: Topology, node_name: str, config_dir: str):
     if not os.path.exists(os.path.join(config_dir, "startup-config")):
         raise FileNotFoundError(
             f"No rendered config for {node_name} — run `configs` before `up`"
         )
-
     cmd = ["docker", "run", "-d", "--name", node_name, "--privileged", "--network=none"]
     for e in CEOS_ENV:
         cmd += ["-e", e]
     cmd += ["-v", f"{config_dir}:/mnt/flash", topo.image]
+    return cmd
+
+
+def _start_frr(topo: Topology, node_name: str, config_dir: str):
+    if not os.path.exists(os.path.join(config_dir, "frr.conf")):
+        raise FileNotFoundError(
+            f"No rendered config for {node_name} — run `configs` before `up`"
+        )
+    # FRR's official image reads /etc/frr/frr.conf + /etc/frr/daemons at
+    # startup and launches whichever daemons the file enables. No env
+    # vars needed — just the two files and the right capabilities.
+    cmd = [
+        "docker", "run", "-d", "--name", node_name, "--privileged", "--network=none",
+        "--cap-add=NET_ADMIN", "--cap-add=NET_RAW", "--cap-add=SYS_ADMIN",
+        "-v", f"{config_dir}/frr.conf:/etc/frr/frr.conf",
+        "-v", f"{config_dir}/daemons:/etc/frr/daemons",
+        topo.image,
+    ]
+    return cmd
+
+
+def start_node(topo: Topology, node_name: str):
+    config_dir = os.path.abspath(os.path.join(GENERATED_DIR, node_name))
+    if topo.platform == "frr":
+        cmd = _start_frr(topo, node_name, config_dir)
+    else:
+        cmd = _start_ceos(topo, node_name, config_dir)
 
     result = _run(cmd, check=False)
     if result.returncode != 0:
@@ -61,7 +85,7 @@ def stop_node(node_name: str):
 
 
 def up(topo: Topology):
-    print(f"Starting {len(topo.nodes)} nodes...")
+    print(f"Starting {len(topo.nodes)} nodes ({topo.platform})...")
     for name in topo.nodes:
         start_node(topo, name)
 

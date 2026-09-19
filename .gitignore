@@ -1,0 +1,9 @@
+# Generated startup-configs are reproducible from topology YAML + templates —
+# don't commit them, regenerate with `make configs`.
+configs/generated/*
+!configs/generated/.gitkeep
+
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

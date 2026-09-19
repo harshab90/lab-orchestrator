@@ -1,54 +1,80 @@
 # lab-orchestrator
 
-A minimal, self-built network lab: spins up Arista cEOS-lab containers,
-wires them together with real veth pairs (no Containerlab/GNS3), and
-pushes generated EOS configs — reproducing a BGP-free MPLS core
-(IS-IS + Segment Routing underlay, iBGP-only-at-the-DC-edge overlay)
-at small scale.
+A minimal, self-built network lab: spins up router containers, wires
+them together with real veth pairs (no Containerlab/GNS3), and pushes
+generated configs — reproducing a BGP-free MPLS core (BGP Labeled-
+Unicast underlay with Route Reflectors, single flat mesh) at small
+scale. Default platform is **FRRouting** — genuinely free, no vendor
+account or license anywhere, native ARM64 (no emulation on Apple
+Silicon). An equivalent Arista cEOS version is kept alongside it for
+whenever a real cEOS image is available.
 
 ## Why this exists
 
 Practicing the production backbone design (28 DCs, 50 midpoints,
-IS-IS/SR underlay, iBGP overlay, Gold/Silver/Bronze CBTS) without
-depending on someone else's lab tool — full control over the wiring
-and automation layer, in a form that's reproducible with one command
-instead of a checklist to remember.
+BGP-LU underlay with Route Reflectors, Gold/Silver/Bronze CBTS)
+without depending on someone else's lab tool — full control over the
+wiring and automation layer, in a form that's reproducible with one
+command instead of a checklist to remember. Started EOS-first, but
+every vendor's free-tier router image (Arista, Cisco, Nokia) turned
+out to be gated behind a corporate account, an entitlement check, or
+a license file — see `docs/platform-notes.md` if that history matters
+later. FRRouting sidesteps all of it: real, open-source, no gate.
 
 ## Prerequisites
 
-1. **Docker Desktop** (Apple Silicon-native is fine — cEOS runs under
-   emulation, see notes below).
-2. **An imported cEOS-lab image.** Arista's cEOS ships as a `.tar.xz`
-   you import yourself — it isn't pulled from a public registry:
+1. **Docker Desktop.**
+2. Python 3.10+ with `pip install -r requirements.txt` (only needed
+   for `make configs` / `make up` — `make wire` runs inside a
+   container and needs nothing installed locally).
+3. **For the FRR topology (default): nothing else.** `docker pull
+   frrouting/frr:latest` happens automatically on first `make up` —
+   no account, no license, native ARM64 on Apple Silicon.
+4. **For the cEOS topology only:** an imported cEOS-lab image (Arista
+   ships this as a `.tar` you import yourself, not pulled from a
+   public registry):
    ```
    docker image import cEOS64-lab-4.32.0F.tar ceos:4.32.0F
    ```
-   The tag here must match `image:` in whichever topology YAML you use.
-3. Python 3.10+ with `pip install -r requirements.txt` (only needed
-   for `make configs` / `make up` — `make wire` runs inside a
-   container and needs nothing installed locally).
+   The tag must match `image:` in `topologies/global-pe-p-backbone-ceos.yaml`.
 
 ## Topologies
 
-- `topologies/global-pe-p-backbone.yaml` (default) — 4 PE routers
-  (Seattle, Raleigh, India, London) + 2 P routers (Dallas, Singapore).
-  Every major hop is 3 independent 5-member port-channels; Seattle-
-  Raleigh and Raleigh-London are direct single/bundled shortcuts that
-  bypass the core — kept specifically so a later Gold/Silver/Bronze
-  CBTS layer has real alternate paths to steer between.
-  91 physical links total (1 single + 90 port-channel members).
+- `topologies/global-pe-p-backbone.yaml` (default, **FRR**) — 4 PE
+  routers (Seattle, Raleigh, India, London) + 2 P routers (Dallas,
+  Singapore). Seattle-Raleigh and Raleigh-London are direct shortcuts
+  that bypass the core — kept specifically so a later Gold/Silver/
+  Bronze CBTS layer has real alternate paths to steer between. Every
+  major hop is 3 bundles of 5 members; FRR has no Port-Channel config
+  of its own, so each member is wired as its own independent routed
+  link (see `topology.py` docstring) — 91 physical links, 91 BGP-LU
+  sessions total.
+- `topologies/global-pe-p-backbone-ceos.yaml` — the same physical
+  design, for Arista cEOS: bundle members are aggregated into real
+  Port-Channel interfaces (18 port-channels, one BGP-LU session each).
 - `topologies/3dc-2mid.yaml` — the original smaller 3-DC/2-midpoint
-  lab, kept as a lighter-weight sanity check (6 physical links).
+  lab (cEOS, IS-IS+SR underlay), kept as a lighter-weight sanity check.
 
 Switch between them with `make TOPO=topologies/<file>.yaml <target>`.
+
+## Platforms
+
+Set per-topology via the top-level `platform:` field (defaults to `ceos`):
+
+- **`frr`** — FRRouting on plain Linux. No LAG/bonding config of its
+  own, so bundle members become individual routed links (own /31
+  each, auto-derived — see `topology.py`) rather than one bonded
+  Port-Channel. Currently implements the `bgp-lu` underlay only.
+- **`ceos`** — Arista EOS. Bundle members aggregate into a real
+  Port-Channel per bundle. Supports both underlay modes below.
 
 ## Underlay modes
 
 Set per-topology via the top-level `underlay:` field (defaults to
 `isis-sr` if omitted):
 
-- **`isis-sr`** — IS-IS + Segment Routing. P routers never run BGP.
-  This is the default and what both topology files originally used.
+- **`isis-sr`** (`ceos` only, currently) — IS-IS + Segment Routing. P
+  routers never run BGP.
 - **`bgp-lu`** — no IGP at all (RFC 8277, "IGP-free core"). Every
   node runs BGP, on direct physical links only — a session exists
   between two nodes if and only if a link exists between them in the
@@ -61,32 +87,31 @@ Set per-topology via the top-level `underlay:` field (defaults to
   `address-family ipv4 labeled-unicast`. One flat mesh, reflected by
   the two RRs.
 
-  **Caveat:** this mode hasn't been validated against a running cEOS
-  instance in this environment (no Docker access here) — the
-  `route-reflector-client` / `address-family ipv4 labeled-unicast`
-  syntax matches documented Arista EOS BGP-LU patterns, but is more
-  niche than plain BGP/IS-IS, so treat the first `make full` run on
-  this topology as the actual verification step, and check
-  `show bgp neighbors` / `show mpls route` if sessions don't come up
-  as expected.
-
-`topologies/global-pe-p-backbone.yaml` currently uses `bgp-lu`;
-`topologies/3dc-2mid.yaml` still uses the `isis-sr` default.
+  **Caveat:** neither the FRR nor the cEOS rendering of this has been
+  validated against a running instance in this environment (no Docker
+  access here) — both follow documented syntax patterns for their
+  platform, but treat the first `make full` run as the actual
+  verification step. For FRR: `show bgp summary` and `show bgp ipv4
+  labeled-unicast` in `vtysh`. For cEOS: `show bgp neighbors` and
+  `show mpls route`.
 
 ## Quickstart — reproduce the whole lab
 
 ```
 make full          # renders configs, starts containers, wires links
-make status         # confirm all 5 nodes are Up
-docker exec -it dc1 Cli
+make status         # confirm all 6 nodes are Up
+docker exec -it seattle vtysh
 ```
 
-Inside the EOS CLI:
+Inside the FRR CLI:
 ```
-show isis segment-routing tunnel
-show ip bgp summary
+show bgp summary
+show bgp ipv4 labeled-unicast
 show ip route 172.16.0.3/32
 ```
+
+(For the cEOS topology: `make TOPO=topologies/global-pe-p-backbone-ceos.yaml full`,
+then `docker exec -it seattle Cli`.)
 
 Tear down and start clean:
 ```
