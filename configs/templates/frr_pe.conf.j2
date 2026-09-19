@@ -3,10 +3,22 @@
 ! overlay. Bundle members are individual routed links (see topology.py
 ! docstring) — each is its own BGP-LU session, giving the same ECMP
 ! behavior as a real Port-Channel would.
+!
+! IMPORTANT FRR quirk (confirmed against FRR's own BGP maintainers):
+! `network`/`redistribute` are NOT supported directly under
+! `address-family ipv4 labeled-unicast` in FRR — unicast and
+! labeled-unicast share the same underlying table, so prefixes are
+! originated under `address-family ipv4 unicast` instead, and only
+! *activated* toward peers under labeled-unicast. This is different
+! from EOS, where `network` lives directly under the labeled-unicast
+! AF. mpls label global-block below enables dynamic label allocation
+! for those originated routes.
 frr version 9.0
 frr defaults traditional
 hostname {{ node.name }}
 no ipv6 forwarding
+!
+mpls label global-block 16 1048575
 !
 interface lo
  ip address {{ node.loopback0 }}
@@ -26,14 +38,17 @@ router bgp {{ node.bgp_as }}
  neighbor {{ nb.peer_ip }} remote-as {{ node.bgp_as }}
 {% endfor %}
  !
+ address-family ipv4 unicast
+  network {{ node.loopback0 }}
+{% for prefix in node.customer_prefixes %}
+  network {{ prefix }}
+{% endfor %}
+ exit-address-family
+ !
  address-family ipv4 labeled-unicast
 {% for nb in node.underlay_neighbors %}
   neighbor {{ nb.peer_ip }} activate
   neighbor {{ nb.peer_ip }} next-hop-self
-{% endfor %}
-  network {{ node.loopback0 }}
-{% for prefix in node.customer_prefixes %}
-  network {{ prefix }}
 {% endfor %}
  exit-address-family
 !

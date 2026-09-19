@@ -2,10 +2,15 @@
 ! FRR Route Reflector — no customer prefixes, no overlay session.
 ! Reflects between clients; sessions to other RRs stay plain peer
 ! sessions (route-reflector-client only set where is_client is true).
+! See frr_pe.conf.j2 for the network-statement-placement quirk this
+! also follows (originate under ipv4 unicast, activate under
+! labeled-unicast).
 frr version 9.0
 frr defaults traditional
 hostname {{ node.name }}
 no ipv6 forwarding
+!
+mpls label global-block 16 1048575
 !
 interface lo
  ip address {{ node.loopback0 }}
@@ -21,6 +26,10 @@ router bgp {{ node.bgp_as }}
 {% for nb in node.underlay_neighbors %}
  neighbor {{ nb.peer_ip }} remote-as {{ node.bgp_as }}
 {% endfor %}
+ !
+ address-family ipv4 unicast
+  network {{ node.loopback0 }}
+ exit-address-family
  !
  address-family ipv4 labeled-unicast
 {% for nb in node.underlay_neighbors %}
