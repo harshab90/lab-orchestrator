@@ -52,7 +52,7 @@ nodes:
     role: pe
     loopback0: 10.0.0.4/32
     bgp_as: 65000
-    customer_prefixes: [210.0.0.0/16, 220.0.0.0/16, 230.0.0.0/16]
+    customer_prefixes: [210.0.0.0/16, 220.0.0.0/16, 200.0.0.0/16]
 
   dallas:
     role: p
