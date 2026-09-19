@@ -1,0 +1,61 @@
+# Topology: 3 datacenters, 2 midpoints (P-routers)
+#
+# Each DC links to BOTH midpoints (dual-homed for redundancy / future
+# Gold-Silver-Bronze path steering). Midpoints never run BGP — they are
+# pure IS-IS + Segment Routing label-switching nodes.
+#
+# This file is the single source of truth: node roles, loopbacks, and
+# links are all read from here by config generation, container startup,
+# and wiring — so redefining the lab is a one-file edit.
+
+name: 3dc-2mid
+
+image: ceos:4.32.0F   # tag you imported with `docker image import`
+
+nodes:
+  dc1:
+    role: dc
+    loopback0: 10.0.0.1/32
+    loopback1: 172.16.0.1/32   # BGP-only test prefix, not in IS-IS
+    isis_net: "49.0001.0000.0000.0001.00"
+    isis_sid_index: 1
+    bgp_as: 65000
+
+  dc2:
+    role: dc
+    loopback0: 10.0.0.2/32
+    loopback1: 172.16.0.2/32
+    isis_net: "49.0001.0000.0000.0002.00"
+    isis_sid_index: 2
+    bgp_as: 65000
+
+  dc3:
+    role: dc
+    loopback0: 10.0.0.3/32
+    loopback1: 172.16.0.3/32
+    isis_net: "49.0001.0000.0000.0003.00"
+    isis_sid_index: 3
+    bgp_as: 65000
+
+  mid1:
+    role: midpoint
+    loopback0: 10.0.0.11/32
+    isis_net: "49.0001.0000.0000.0011.00"
+    isis_sid_index: 11
+
+  mid2:
+    role: midpoint
+    loopback0: 10.0.0.12/32
+    isis_net: "49.0001.0000.0000.0012.00"
+    isis_sid_index: 12
+
+# Every DC links to every midpoint. Point-to-point /31s auto-derived
+# by config generation from the link's position in this list — don't
+# reorder existing links once a lab has been used, or IPs will shift.
+links:
+  - {a: dc1,  b: mid1, subnet: 10.1.1.0/31}
+  - {a: dc1,  b: mid2, subnet: 10.1.2.0/31}
+  - {a: dc2,  b: mid1, subnet: 10.1.3.0/31}
+  - {a: dc2,  b: mid2, subnet: 10.1.4.0/31}
+  - {a: dc3,  b: mid1, subnet: 10.1.5.0/31}
+  - {a: dc3,  b: mid2, subnet: 10.1.6.0/31}

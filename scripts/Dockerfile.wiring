@@ -1,0 +1,15 @@
+# Minimal image that can reach into other containers' network
+# namespaces (iproute2) and ask Docker which PID each one is
+# (docker CLI). Run with --privileged --pid=host so /proc/<pid>/ns/net
+# resolves to the *host's* view of every container, not just this
+# helper's own namespace.
+FROM docker:25-cli
+
+RUN apk add --no-cache python3 py3-yaml py3-jinja2 iproute2
+
+WORKDIR /app
+COPY orchestrator /app/orchestrator
+COPY configs /app/configs
+COPY topologies /app/topologies
+
+ENTRYPOINT ["python3", "-m", "orchestrator.cli"]
