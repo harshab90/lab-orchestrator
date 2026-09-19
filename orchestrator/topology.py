@@ -6,22 +6,35 @@ a single, validated in-memory shape instead of re-parsing YAML.
 
 Supports two kinds of connections between nodes:
   - single_links: one plain point-to-point Ethernet link
-  - bundles: a port-channel (LAG) of N member Ethernet links between
-    the same pair of nodes. Multiple bundle entries between the same
-    pair of nodes produce multiple independent port-channels.
+  - bundles: a group of N member Ethernet links between the same pair
+    of nodes. Multiple bundle entries between the same pair of nodes
+    produce multiple independent groups.
+
+Supports two platforms, set per-topology via top-level `platform:`
+(defaults to "ceos"):
+  - "ceos" — Arista EOS. Bundle members are aggregated into a real
+    Port-Channel (LAG) interface per bundle, one BGP-LU session per
+    Port-Channel.
+  - "frr" — FRRouting on plain Linux. Linux doesn't do LAG-style
+    bonding through routing config the way EOS does, so each bundle
+    member is instead treated as its own independent routed link with
+    its own auto-derived /31 subnet (offset from the bundle's base
+    subnet) — one BGP-LU session per physical member instead of per
+    bundle. Same ECMP/redundancy behavior, just N separate sessions
+    instead of 1 bonded one.
 
 Supports two underlay modes, set per-topology via top-level `underlay:`:
   - "isis-sr" (default) — IS-IS + Segment Routing underlay, P routers
-    never run BGP.
+    never run BGP. (ceos platform only, currently.)
   - "bgp-lu" — no IGP at all. Every node runs BGP. Core (P) nodes are
     BGP Route Reflectors, peering hop-by-hop over each directly
     connected interface in address-family ipv4 labeled-unicast
     (RFC 8277) and reflecting between clients — this is what actually
     makes "iBGP instead of an IGP" possible, since a literal loopback-
     to-loopback full mesh can't bootstrap (loopbacks aren't reachable
-    until the underlay exists). The PE overlay (loopback-based,
-    full-mesh, carries customer prefixes) is unchanged either way —
-    it just resolves recursively through whichever underlay is active.
+    until the underlay exists). Loopbacks AND customer prefixes are
+    both advertised directly into these same direct-link sessions —
+    single-tenant network, no separate VPN/VRF overlay needed.
 
 Backward compatible with the older flat schema (top-level `links:`,
 per-node `loopback1:`) used by earlier topology files.
@@ -53,12 +66,16 @@ class Node:
     customer_prefixes: list = field(default_factory=list)
     # peer_name -> Ethernet ifnum, for plain point-to-point single_links
     interfaces: dict = field(default_factory=dict)
-    # one entry per port-channel this node participates in:
+    # ceos platform only: one entry per port-channel this node is in:
     # {"id": int, "peer": str, "ip": str, "peer_ip": str, "members": [ifnum, ...]}
     port_channels: list = field(default_factory=list)
-    # bgp-lu mode only: one entry per directly-connected BGP-LU session
-    # (one per single_link, one per bundle/port-channel — peering
-    # happens on the logical Port-Channel address, not per member):
+    # frr platform only: one entry per PHYSICAL link (single_links as-is,
+    # bundles expanded to one entry per member with its own subnet):
+    # {"ifnum": int, "peer": str, "local_ip": "x.x.x.x/31", "peer_ip": "x.x.x.x"}
+    frr_links: list = field(default_factory=list)
+    # bgp-lu mode only: one entry per BGP-LU session — granularity
+    # depends on platform (per-Port-Channel for ceos, per-physical-
+    # member for frr, see module docstring):
     # {"peer": str, "peer_ip": str (bare address, no prefix), "is_client": bool}
     underlay_neighbors: list = field(default_factory=list)
 
@@ -106,7 +123,18 @@ class Bundle:
     members_b: list = field(default_factory=list)
 
     def ip_for(self, node_name: str) -> str:
+        """Shared Port-Channel-level address (ceos platform)."""
         return _ip_for(self.subnet, node_name, self.a, self.b)
+
+    def member_ip_for(self, node_name: str, member_index: int) -> str:
+        """Per-member address (frr platform): the base subnet shifted
+        forward by member_index full subnet-widths, so each member
+        gets its own non-overlapping /31 (or whatever width was given)."""
+        base = ipaddress.ip_network(self.subnet, strict=False)
+        shift = member_index * base.num_addresses
+        shifted_addr = ipaddress.ip_address(int(base.network_address) + shift)
+        member_net = ipaddress.ip_network(f"{shifted_addr}/{base.prefixlen}", strict=False)
+        return _ip_for(str(member_net), node_name, self.a, self.b)
 
 
 class Topology:
@@ -116,9 +144,14 @@ class Topology:
 
         self.name: str = raw["name"]
         self.image: str = raw["image"]
+        self.platform: str = raw.get("platform", "ceos")
+        if self.platform not in ("ceos", "frr"):
+            raise ValueError(f"Unknown platform: {self.platform!r}")
         self.underlay: str = raw.get("underlay", "isis-sr")
         if self.underlay not in ("isis-sr", "bgp-lu"):
             raise ValueError(f"Unknown underlay mode: {self.underlay!r}")
+        if self.platform == "frr" and self.underlay != "bgp-lu":
+            raise ValueError("frr platform currently only implements the bgp-lu underlay")
 
         self.nodes: dict[str, Node] = {}
         for name, spec in raw["nodes"].items():
@@ -146,8 +179,18 @@ class Topology:
             return eth_counter[name]
 
         for link in self.single_links:
-            self.nodes[link.a].interfaces[link.b] = next_eth(link.a)
-            self.nodes[link.b].interfaces[link.a] = next_eth(link.b)
+            ifnum_a = next_eth(link.a)
+            ifnum_b = next_eth(link.b)
+            self.nodes[link.a].interfaces[link.b] = ifnum_a
+            self.nodes[link.b].interfaces[link.a] = ifnum_b
+            self.nodes[link.a].frr_links.append({
+                "ifnum": ifnum_a, "peer": link.b,
+                "local_ip": link.ip_for(link.a), "peer_ip": _addr_only(link.ip_for(link.b)),
+            })
+            self.nodes[link.b].frr_links.append({
+                "ifnum": ifnum_b, "peer": link.a,
+                "local_ip": link.ip_for(link.b), "peer_ip": _addr_only(link.ip_for(link.a)),
+            })
 
         for bundle in self.bundles:
             for side, other in [(bundle.a, bundle.b), (bundle.b, bundle.a)]:
@@ -165,17 +208,36 @@ class Topology:
                     "peer_ip": bundle.ip_for(other),
                     "members": members,
                 })
+                for idx, ifnum in enumerate(members):
+                    self.nodes[side].frr_links.append({
+                        "ifnum": ifnum,
+                        "peer": other,
+                        "local_ip": bundle.member_ip_for(side, idx),
+                        "peer_ip": _addr_only(bundle.member_ip_for(other, idx)),
+                    })
 
     def _assign_underlay_neighbors(self):
-        """One BGP-LU session per single_link, and one per bundle (on
-        the logical Port-Channel address, not per member). RR-client
-        is set only when this node is itself an RR and the neighbor
-        is not — a session between two RRs (Dallas-Singapore) stays a
-        plain peer relationship so routes still propagate correctly
-        per standard route-reflection rules."""
+        """BGP-LU sessions. For ceos: one per single_link, one per
+        bundle (Port-Channel-level address). For frr: one per
+        PHYSICAL link (single_links as-is, bundles at member
+        granularity), since there's no bonded logical interface to
+        peer over. RR-client is set only when this node is itself an
+        RR and the neighbor is not — a session between two RRs
+        (Dallas-Singapore) stays a plain peer relationship so routes
+        still propagate correctly per standard route-reflection rules."""
         def is_client(local_name, peer_name):
             local, peer = self.nodes[local_name], self.nodes[peer_name]
             return local.route_reflector and not peer.route_reflector
+
+        if self.platform == "frr":
+            for node in self.nodes.values():
+                for link in node.frr_links:
+                    node.underlay_neighbors.append({
+                        "peer": link["peer"],
+                        "peer_ip": link["peer_ip"],
+                        "is_client": is_client(node.name, link["peer"]),
+                    })
+            return
 
         for link in self.single_links:
             for side, other in [(link.a, link.b), (link.b, link.a)]:

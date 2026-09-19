@@ -1,26 +1,21 @@
 # Topology: 4 PE routers (Seattle, Raleigh, India, London), 2 P
 # routers (Dallas, Singapore) — matches the whiteboard diagram.
 #
-# platform: frr — runs on FRRouting (native ARM64, no emulation, no
-# vendor licensing). underlay: bgp-lu — NO IS-IS. Dallas and Singapore
-# are BGP Route Reflectors; every physical link is its own direct BGP
-# session in address-family ipv4 labeled-unicast (RFC 8277). Loopbacks
-# AND customer prefixes are advertised into these same sessions —
-# single-tenant network, no separate overlay. See README "Underlay
-# modes" and "Platforms" for the reasoning.
+# underlay: bgp-lu — NO IS-IS. Dallas and Singapore are BGP Route
+# Reflectors; every physical link (single link or port-channel) is a
+# separate BGP-LU (RFC 8277) session in address-family ipv4
+# labeled-unicast. The PE-to-PE overlay mesh (loopback-based, carries
+# customer prefixes) is unchanged from the IS-IS version — it just
+# resolves recursively through the BGP-LU labeled routes instead of
+# an IGP+SR underlay. See README "Underlay modes" for the reasoning.
 #
 # Every major hop (Seattle-Dallas, Raleigh-Dallas, Dallas-Singapore,
-# Singapore-India, Singapore-London, Raleigh-London) is THREE bundles
-# of 5 members each (5x800G in production; scaled down to plain veth
-# links here since the lab tests protocol behavior, not bandwidth).
-# FRR has no LAG/Port-Channel config of its own, so each member is
-# wired as its own independent routed link with its own auto-derived
-# /31 (see topology.py) — one BGP-LU session per physical member
-# (15 sessions per major hop) instead of one per bundle. Same ECMP/
-# redundancy behavior as a real bonded Port-Channel would give.
-# The equivalent cEOS/Port-Channel version of this topology is kept
-# at global-pe-p-backbone-ceos.yaml for comparison, or for whenever a
-# real cEOS image is available.
+# Singapore-India, Singapore-London, Raleigh-London) is THREE
+# independent port-channels, each bundling 5 members (5x800G in
+# production; scaled down to plain veth links here since the lab
+# tests protocol behavior, not bandwidth) — each port-channel becomes
+# its own separate BGP-LU session, giving 3-way ECMP at the routing
+# level between adjacent nodes.
 #
 # Seattle-Raleigh is a single direct link (no bundling) — a local,
 # lower-capacity backup path between the two US PEs.
@@ -31,9 +26,8 @@
 
 name: global-pe-p-backbone
 underlay: bgp-lu
-platform: frr
 
-image: frrouting/frr:latest
+image: ceos:4.32.0F
 
 nodes:
   seattle:
